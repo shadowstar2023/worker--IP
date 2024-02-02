@@ -1,0 +1,153 @@
+addEventListener('fetch', (event) => {
+  event.respondWith(handleRequest(event.request));
+});
+
+// 用户填写信息部分
+const cloudflareApiKey = "";    //你cf的API
+const cloudflareEmail = "";      //你cf的登入邮箱
+const cloudflareZoneId = "";     //你绑定在cf的域名ZoneId
+const mainDomain = "";        //绑定的域名,比如123.com
+const subdomain = "";         // 二级域名，比如“cfip
+const githubTxtUrl = "https://raw.githubusercontent.com/ymyuuu/IPDB/main/bestproxy.txt";
+const telegramBotToken = "";     //TGbot的token
+const telegramChatId = "";       //你的TG号
+
+// 创建一个包含国家简称与中文名称映射的对象
+const countryCodeMap = {
+  'JP': '日本',
+  'SG': '新加坡',
+  'US': '美国',
+  'CN': '中国',
+  'KR': '韩国',
+  'DE': '德国',
+  'FR': '法国',
+  'GB': '英国',
+  'CA': '加拿大',
+  'AU': '澳大利亚',
+  'IN': '印度',
+  'BR': '巴西',
+  'RU': '俄罗斯',
+  'IT': '意大利',
+  'ES': '西班牙',
+  'MX': '墨西哥',
+  'ID': '印度尼西亚',
+  'TR': '土耳其',
+  'AR': '阿根廷',
+  'ZA': '南非',
+  'NL': '荷兰',
+  'SE': '瑞典',
+  'CH': '瑞士',
+  'AT': '奥地利',
+  'BE': '比利时',
+  'NO': '挪威',
+  'DK': '丹麦',
+  'FI': '芬兰',
+  'NZ': '新西兰',
+  'IE': '爱尔兰',
+  'SG': '新加坡',
+  'MY': '马来西亚',
+  'TH': '泰国',
+  // 其他国家的映射...
+};
+
+async function handleRequest(request) {
+  // 获取 GitHub TXT 文件内容
+  const githubTxtResponse = await fetch(githubTxtUrl);
+  const githubTxtContent = await githubTxtResponse.text();
+  const ipList = githubTxtContent.trim().split('\n').filter((ip) => ip.includes('.'));
+
+  // 如果没有有效的 IPv4 地址，停止运行并返回错误信息
+  if (ipList.length === 0) {
+    return new Response("GitHub TXT 文件中未找到有效的 IPv4 地址。", { status: 500 });
+  }
+
+  // Cloudflare API 请求头
+  const headers = {
+    'X-Auth-Email': cloudflareEmail,
+    'X-Auth-Key': cloudflareApiKey,
+    'Content-Type': 'application/json',
+  };
+
+  // 初始化数组以存储 IP-国家映射
+  const ipCountryMap = {};
+
+  // 为每个 IP 地址获取国家信息
+  for (const ip of ipList) {
+    const ipInfoResponse = await fetch(`https://ipinfo.io/${ip}/json`);
+    const ipInfo = await ipInfoResponse.json();
+
+    if (ipInfo && ipInfo.country) {
+      ipCountryMap[ip] = ipInfo.country;
+    }
+  }
+
+  // 获取现有 DNS 记录
+  const existingRecordsResponse = await fetch(
+    `https://api.cloudflare.com/client/v4/zones/${cloudflareZoneId}/dns_records?type=A&name=${subdomain}.${mainDomain}`,
+    { headers: headers }
+  );
+  const existingRecords = await existingRecordsResponse.json();
+
+  // 如果指定的子域名存在，删除所有相关的记录
+  const resultRecords = existingRecords.result || [];
+  for (const record of resultRecords) {
+    const recordId = record.id;
+    if (recordId) {
+      const deleteResponse = await fetch(
+        `https://api.cloudflare.com/client/v4/zones/${cloudflareZoneId}/dns_records/${recordId}`,
+        { method: 'DELETE', headers: headers }
+      );
+      console.log(`Delete Response for ${record.content}:`, deleteResponse);
+    }
+  }
+
+  // 重新添加新的 DNS 记录
+  let mergedMessage = "DNS 更新完成！\nIP 地址和国家信息：\n";
+
+  for (const ip of ipList) {
+    const createResponse = await fetch(
+      `https://api.cloudflare.com/client/v4/zones/${cloudflareZoneId}/dns_records`,
+      {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({
+          type: 'A',
+          name: `${subdomain}.${mainDomain}`,
+          content: ip,
+        }),
+      }
+    );
+
+    const createResponseJson = await createResponse.json();
+
+    if (createResponseJson.success) {
+      const newRecordName = createResponseJson.result.name;
+
+      if (newRecordName) {
+        // 获取国家中文名称
+        const countryName = countryCodeMap[ipCountryMap[ip]] || '未知';
+
+        // Append the record information to the merged message, including country information
+        const timestamp = new Date().toLocaleString();
+        mergedMessage += `${ip} - ${countryName} (${ipCountryMap[ip] || '未知'}) - 成功导入到 ${newRecordName}（${timestamp}）\n`;
+      } else {
+        console.log("错误：无法获取新的 DNS 记录名称。");
+      }
+    } else {
+      console.log(`错误：无法创建新的 DNS 记录。错误信息：${createResponseJson.errors}`);
+    }
+  }
+
+  // Send the merged message to Telegram
+  await sendTelegramMessage(telegramBotToken, telegramChatId, mergedMessage);
+
+  return new Response('DNS 更新完成！', { status: 200 });
+}
+
+async function sendTelegramMessage(botToken, chatId, message) {
+  await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'Markdown' }),
+  });
+}
